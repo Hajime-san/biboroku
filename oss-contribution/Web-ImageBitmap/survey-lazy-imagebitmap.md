@@ -215,6 +215,7 @@
 - https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_factories.cc
 - https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/core/imagebitmap/image_bitmap.cc
 - https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_source_util.cc
+- https://github.com/google/dawn/blob/620a520f5029e14b57a0b58096c022e339b1857b/src/dawn/native/CopyTextureForBrowserHelper.cpp
 
 ### 観察できたポイント
 - **Blob**:
