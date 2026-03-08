@@ -1,10 +1,10 @@
-# survey: createImageBitmap の遅延化
+# survey: createImageBitmap の処理モデル
 
 ## 目的
-`createImageBitmap` の画像処理を可能な限り遅延させ、仕様互換性・破壊的変更回避・性能向上を両立する。
+`createImageBitmap` の画像処理を、作成時に確定すべきものと利用時に適用すべきものに分離し、仕様互換性・破壊的変更回避・性能向上を両立する。
 
 ## 参照資料
-- plan-lazy-imagebitmap.md
+- plan-imagebitmap-processing.md
 - PR: https://github.com/denoland/deno/pull/28105
 
 ## 現状把握（main: ext/image）
@@ -23,7 +23,7 @@
 ### getData の位置づけ
 - `Deno[Deno.internal].getBitmapData` から `SymbolFor("Deno_bitmapData")` を通じて呼び出される。
 - テスト（`tests/unit/image_bitmap_test.ts`）でのみ利用される前提。
-- これは遅延デコードのトリガーにできる余地がある。
+- これは利用時処理適用のトリガーにできる余地がある。
 
 ### structuredClone / transfer の現状
 - `structuredClone(ImageBitmap)` は `{}` になる（`img-clone.js` の実行結果）。
@@ -44,8 +44,8 @@
   - RGB 形式は RGBA に変換してから転送（`GPUCopyExternalImageSource` 側の制約に合わせる）。
 - つまり PR 側の `copyExternalImageToTexture` は「ImageBitmap の保持情報を使って、描画/転送時に変換を適用する」方向の設計を含んでいる。
 
-## 遅延化の設計余地
-### 遅延可能（候補）
+## 処理モデルの設計余地
+### 利用時に適用可能（候補）
 - クロップ
 - リサイズ
 - 方向補正
@@ -53,7 +53,7 @@
 - premultiply/unpremultiply
 - 実ピクセルデコード
 
-### 即時に必要
+### 作成時に必要
 - 引数チェック（`sw/sh == 0`、`resizeWidth/resizeHeight == 0`）
 - 非対応 MIME などの即時エラー
 - `width/height` の確定（ユーザーに観測されるため）
@@ -61,55 +61,55 @@
 ### 互換性・エラータイミングの論点
 - 現行は decode に失敗した場合、`createImageBitmap` の Promise が reject される前提。
 - ヘッダ解析のみで `width/height` を確定できても、実デコードでしか検出できない破損がある。
-- 遅延化により「不正画像の reject が遅れる」挙動変更が起きないように要検討。
+- 処理時点を後ろに送ることで「不正画像の reject が遅れる」挙動変更が起きないように要検討。
 - 仕様互換を重視するなら、少なくとも「不正画像の検知」は `createImageBitmap` 内で完結させる必要がある。
 - 妥協案:
-  - 画像デコード自体は即時に行い、後段の処理（crop/resize/色変換/premultiply）だけ遅延する。
-  - ヘッダ解析のみで `width/height` を確定し、実デコードは遅延する（ただし reject タイミングが遅れる可能性がある）。
+  - 画像デコード自体は即時に行い、後段の処理（crop/resize/色変換/premultiply）だけ利用時に適用する。
+  - ヘッダ解析のみで `width/height` を確定し、実デコードは利用時に回す（ただし reject タイミングが遅れる可能性がある）。
 
 ## 画像デコーダAPI（image crate）で確認したこと
 - `ImageDecoder` には `dimensions()` と `color_type()` があり、ピクセルの `read_image()` 前にメタ情報を取得できる。
 - `icc_profile()` と `orientation()` はメタデータ取得用の API として提供されている。
-- `read_image()` は全ピクセルデコードを行うため、遅延化の境界として扱える。
+- `read_image()` は全ピクセルデコードを行うため、処理境界として扱える。
 - ただし decoder 構築やメタ取得の段階でもエラーが起きる可能性があり、完全な破損検出は `read_image()` まで残る。
 
-## 遅延パイプライン案（たたき台）
+## 処理パイプライン案（たたき台）
 - Blob:
   - MIME sniff は即時。
   - デコーダ生成後に `dimensions()` / `orientation()` / `icc_profile()` を取得して `width/height` と必要なメタを確定。
-  - ピクセルは保持せず、エンコード済みバイトとオプションを `Lazy` に保存。
+  - ピクセルは保持せず、エンコード済みバイトとオプションを内部状態として保存。
 - ImageData:
   - 既に RGBA バッファなので decode は不要。
-  - `LazyRaw` としてバイト列と幅・高さ・オプションを保持し、materialize 時に処理のみ実行。
+  - 生バイト列と幅・高さ・オプションを保持し、transform 時に処理のみ実行。
 - ImageBitmap:
-  - 既に `Decoded` なら参照 or clone で `Lazy` を作らず即時利用。
-  - `Lazy` 由来なら、元の `Lazy` を共有するか、materialize した上で処理を再適用するか検討。
+  - 既に `Decoded` なら参照 or clone でそのまま利用。
+  - 未確定の内部状態由来なら、元情報を共有するか、transform した上で処理を再適用するか検討。
 
-- materialize（共通）:
+- transform（共通）:
   - 仕様順序に合わせて処理: crop -> resize -> orientation -> color space -> premultiply/unpremultiply。
   - `getData()`（テスト）と `copyExternalImageToTexture` が主なトリガー。
 
 ## 推奨アプローチ（段階的）
 - 段階1（互換性重視）:
   - decode 自体は `createImageBitmap` 内で実行し、reject タイミングを維持。
-  - crop/resize/方向補正/色変換/premultiply を遅延し、materialize 時に実行。
-- 段階2（遅延強化・要判断）:
-  - ヘッダ解析のみで `width/height` を確定し、実デコードは遅延。
+  - crop/resize/方向補正/色変換/premultiply を利用時に適用し、transform 時に実行。
+- 段階2（利用時適用の拡大・要判断）:
+  - ヘッダ解析のみで `width/height` を確定し、実デコードは利用時に適用。
   - reject タイミングが変わる可能性があるため、互換性への影響評価が必須。
 - 段階3（消費側最適化）:
-  - `copyExternalImageToTexture` などの消費経路で materialize を統一し、GPU側最適化の余地を残す。
+  - `copyExternalImageToTexture` などの消費経路で transform を統一し、GPU側最適化の余地を残す。
 
 ## 現時点の結論
 - 仕様互換と破壊的変更回避を最優先にするなら、decode の即時実行は維持すべき。
-- ただし後段の処理は遅延可能であり、ここを遅延化するのが現実的な第一歩。
-- decode の遅延は性能面で魅力があるが、reject タイミングの変更が最大の論点。
+- ただし後段の処理は利用時に適用可能であり、ここを移すのが現実的な第一歩。
+- decode の利用時適用は性能面で魅力があるが、reject タイミングの変更が最大の論点。
 - 調査完了時点では段階1（互換性重視）を推奨。
 
 ## 残タスク（採用判断に依存）
 - ヘッダ解析のみで `width/height` を確定する場合の互換性評価。
 - 不正画像の reject タイミング変更を許容できるかの判断。
-- `Lazy` の保持メタ情報を最小化する設計詳細。
-- `copyExternalImageToTexture` での materialize 実装計画の具体化。
+- 内部保持メタ情報を最小化する設計詳細。
+- `copyExternalImageToTexture` での transform 実装計画の具体化。
 
 ---
 
@@ -121,20 +121,20 @@
 - 現行挙動では `createImageBitmap` の Promise が reject されるが、ヘッダ解析のみだと成功してしまう。
 
 ### 互換性に影響する代表ケース
-- **破損した画像**: 
+- **破損した画像**:
   - 現行: `createImageBitmap` が reject。
-  - 遅延: `ImageBitmap` が返るが、後で `getData()` / GPU upload で reject。
+  - 利用時適用: `ImageBitmap` が返るが、後で `getData()` / GPU upload で reject。
 - **巨大画像の拒否**:
   - `width/height` だけで拒否可能ならヘッダ解析で十分。
   - メモリ制限や decoder `Limits` を厳密に適用する場合は、decoder 構築段階で制限判定が必要。
 
 ### 実務的な評価軸
-- 互換性の優先度が高いなら、**ヘッダ解析だけの遅延は避ける**べき。
-- パフォーマンス優先なら、**ヘッダ解析 + decode 遅延**に進むが、仕様差分の文書化が必要。
+- 互換性の優先度が高いなら、**ヘッダ解析だけの方式は避ける**べき。
+- パフォーマンス優先なら、**ヘッダ解析 + decode 利用時適用**に進むが、仕様差分の文書化が必要。
 
 ### 推奨の落としどころ
-- 段階1の通り「decode 即時、後段処理遅延」が最も安全。
-- ヘッダ解析のみの完全遅延は、**別モード（実験的機能や内部フラグ）**として切り替えられる形が望ましい。
+- 段階1の通り「decode 即時、後段処理は利用時適用」が最も安全。
+- ヘッダ解析のみの方式は、**別モード（実験的機能や内部フラグ）**として切り替えられる形が望ましい。
 
 ---
 
@@ -149,11 +149,11 @@
 
 ### 可能な折衷策
 - decode は即時に行い reject を維持する。
-- ただし **ピクセル変換（crop/resize/etc）を遅延**することでパフォーマンス改善は得られる。
+- ただし **ピクセル変換（crop/resize/etc）を利用時に適用**することでパフォーマンス改善は得られる。
 
 ---
 
-## 3. `Lazy` が保持するメタ情報の最小セット
+## 3. 内部保持メタ情報の最小セット
 ### 保持が必要なもの
 - `width/height`: APIとして必須
 - `imageOrientation`: `from-image` の場合に必要
@@ -164,30 +164,30 @@
 
 ### 保持が任意で判断が必要なもの
 - ICC profile そのもの:
-  - 色変換を遅延するなら必要。
+  - 色変換を利用時適用するなら必要。
   - `colorSpaceConversion: none` の場合は不要。
 
 ### 最小セットの方針
-- **Lazy状態に必要なのは「後段で再現可能な情報」だけ**
+- **利用時適用に必要なのは「後段で再現可能な情報」だけ**
   - デコード済み `DynamicImage` に依存しないため、オプションとバイト列が中核。
-- メタ情報の取得コストが高い場合、取得を遅延する選択肢もあるが、`width/height` は即時確定が必須。
+- メタ情報の取得コストが高い場合、取得時点を後ろに送る選択肢もあるが、`width/height` は即時確定が必須。
 
 ---
 
-## 4. `copyExternalImageToTexture` での materialize 実装計画
+## 4. `copyExternalImageToTexture` での transform 実装計画
 ### 望ましい構成
-- `ImageBitmap` 側に `materialize()` を集約し、消費側が統一的に利用可能にする。
+- `ImageBitmap` 側に `transform()` を集約し、消費側が統一的に利用可能にする。
 - `copyExternalImageToTexture` では:
-  1. `ImageBitmap::materialize()` で `DynamicImage` を確保
+  1. `ImageBitmap::transform()` で `DynamicImage` を確保
   2. 現行処理（crop/flip/premultiply/色変換）を適用
   3. GPU 書き込み用のバッファ構築
 
 ### 実装上の注意
-- materialize 後の `DynamicImage` をキャッシュするか、毎回生成するかを決める必要がある。
+- transform 後の `DynamicImage` をキャッシュするか、毎回生成するかを決める必要がある。
 - 複数回の `copyExternalImageToTexture` 呼び出しがある場合は、キャッシュが有効。
 
 ### キャッシュ戦略
-- **Lazy -> Decoded へ昇格する一方向のキャッシュ**が最も単純。
+- **内部状態 -> Decoded へ昇格する一方向のキャッシュ**が最も単純。
 - `close()` 呼び出し時にキャッシュを破棄する。
 
 ---
@@ -208,13 +208,14 @@
 
 ### 解釈
 - Firefox 実装は **createImageBitmap 内でデコードと変換処理を完了**させ、Promise 解決時に確定済みの `ImageBitmap` を返している。
-- 遅延化を進める場合、既存ブラウザと reject タイミングがずれる可能性がある点に注意が必要。
+- 利用時適用モデルを進める場合、既存ブラウザと reject タイミングがずれる可能性がある点に注意が必要。
 
 ## 6. 既存ブラウザ実装の確認（Chromium）
 参照:
-- https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_factories.cc
-- https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/core/imagebitmap/image_bitmap.cc
-- https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_source_util.cc
+- https://source.chromium.org/chromium/chromium/src/+/400e49c0ae7ee0887d7a812fea6eec06720bc1d9:third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_factories.cc
+- https://source.chromium.org/chromium/chromium/src/+/400e49c0ae7ee0887d7a812fea6eec06720bc1d9:third_party/blink/renderer/core/imagebitmap/image_bitmap.cc
+- https://source.chromium.org/chromium/chromium/src/+/400e49c0ae7ee0887d7a812fea6eec06720bc1d9:third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_source_util.cc
+- https://source.chromium.org/chromium/chromium/src/+/400e49c0ae7ee0887d7a812fea6eec06720bc1d9:third_party/blink/renderer/platform/graphics/static_bitmap_image_transform.cc
 - https://github.com/google/dawn/blob/620a520f5029e14b57a0b58096c022e339b1857b/src/dawn/native/CopyTextureForBrowserHelper.cpp
 
 ### 観察できたポイント
@@ -237,8 +238,8 @@
   - ICC などのメタ情報は保持
   - 色変換・premultiply は描画時にオンザフライ（GPU ではほぼ無償、CPU ではキャッシュ/事前変換が必要）
 - 具体的な実装として `static_bitmap_image_transform.cc` では、`StaticBitmapImageTransform::Apply` が変換の必要性（crop/resize/flip/色空間変換/premultiply）を判定し、必要なら以下の経路で実行する:
-  - GPU 経路: `ApplyWithBlit` → `CanvasNon2DResourceProviderSharedImage` を用いた blit（premultiply 必須）
-  - CPU 経路: `ApplyUsingPixmap` → `readPixels` + `scalePixels` + `FlipSkPixmapInPlace` + `reinterpretColorSpace`（CPU パスはここで確定）
+  - GPU 経路: `ApplyWithBlit` -> `CanvasNon2DResourceProviderSharedImage` を用いた blit（premultiply 必須）
+  - CPU 経路: `ApplyUsingPixmap` -> `readPixels` + `scalePixels` + `FlipSkPixmapInPlace` + `reinterpretColorSpace`（CPU パスはここで確定）
 - `GPUQueue.copyExternalImageToTexture` の下層（Dawn `CopyTextureForBrowserHelper.cpp`）では、WGSL で copy+変換を 1 パス化する設計が確認できる:
   - `copyExternalTexture` / `copyTexture` の fragment entry point を切り替えつつ、共通の `transform()` で処理。
   - `steps_mask` により以下の処理を必要時のみ有効化（不要ならスキップ）:
@@ -257,39 +258,3 @@
   - 変換係数（transfer function / conversion matrix）を uniform にまとめ、GPU 側でまとめて適用。
 - 補足:
   - Dawn ソースには「互換 format 間の direct copy fast path は将来最適化候補」という TODO がある（現状は主に render pass 経由の統一パス）。
-- つまり Chromium は「decode 即時・メタ保持」を前提に、実際の copy/描画時に GPU 変換パスへ寄せ、**必要な変換だけを実行**することで性能と互換性を両立している。
-
-## 7. 既存ブラウザ実装の確認（WebKit）
-参照:
-- https://raw.githubusercontent.com/WebKit/WebKit/main/Source/WebCore/html/ImageBitmap.cpp
-
-### 観察できたポイント
-- **Blob**:
-  - `PendingImageBitmap` が `FileReaderLoader` で Blob を読み、`createFromBuffer` で `BitmapImage::create` + `setData` によりデコード。
-  - `drawImage` を使って crop/resize/flip/方向補正を **Promise 解決前** に適用して `ImageBitmap` を生成。
-- **ImageData**:
-  - 変換不要なら `putPixelBuffer` で直接書き込み。
-  - 変換が必要な場合は `ImageBuffer` にコピーして `drawImageBuffer` で crop/resize/flip を適用。
-- **HTMLImageElement / Canvas / Video / ImageBitmap**:
-  - いずれも `croppedSourceRectangleWithFormatting` と `outputSizeForSourceRectangle` でサイズ計算し、
-    `ImageBuffer` に `drawImage` して確定した `ImageBitmap` を返す。
-- **premultiplyAlpha / colorSpace**:
-  - `alphaPremultiplicationForPremultiplyAlpha` を用いて premultiply の方針を決定し、描画時に反映。
-  - `createImageBuffer` では `DestinationColorSpace` を選択して描画（色空間変換を含む）。
-
-### 解釈
-- WebKit も **createImageBitmap 内でデコードと変換処理を完了**させる設計。
-- Promise 解決時には処理済みの `ImageBitmap` が返るため、遅延化は互換性差分になり得る。
-
-## 深掘りまとめ（結論）
-- 互換性重視のまま遅延を進めるなら「decode即時、後段遅延」が現実的。
-- `Lazy` 保持メタ情報は「再現可能性」を軸に最小化する。
-- `materialize()` を `ImageBitmap` に集約し、消費側の処理を統一するのが設計上安全。
-- ヘッダ解析のみの完全遅延は、reject タイミングの変更が最大リスク。
-
-## 定期まとめ（進捗メモ）
-- 初期整理完了: main 実装・PR #28105 の読み取り・getData のテスト用途確認
-- 追加整理: image crate のデコーダAPI（dimensions/orientation/icc）を確認
-- たたき台: 遅延パイプライン案の作成
-- 結論整理完了: 互換性重視は decode 即時・後段遅延、遅延強化は reject タイミング要評価
-- 調査完了: 残タスクの深掘りと推奨方針を追記

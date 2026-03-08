@@ -2,7 +2,7 @@
 
 ## 目的
 - `createImageBitmap` の Promise settle を、仕様で要求される **global task（bitmap task source）** に合わせる場合の実装影響を整理する。
-- 既存の遅延変換計画（`impl-lazy-imagebitmap.md`）と、イベントループ側変更を分離実装できるようにする。
+- 既存の処理モデル計画（`impl-imagebitmap-processing.md`）と、イベントループ側変更を分離実装できるようにする。
 
 ## 参照
 - WHATWG HTML:
@@ -12,7 +12,7 @@
   - https://github.com/whatwg/html/issues/5329
   - https://github.com/whatwg/html/issues/10611
 - 実装計画:
-  - `impl-lazy-imagebitmap.md`
+  - `impl-imagebitmap-processing.md`
 
 ---
 
@@ -65,7 +65,7 @@
 
 ---
 
-## 遅延変換実装との結合可能性
+## 処理モデル実装との結合可能性
 
 ### 結論
 - **分離実装しやすい**。どちら先行でも結合可能。
@@ -76,10 +76,10 @@
 - この層の内部を
   - 直接 settle 実装
   - bitmap task 経由実装
- で差し替え可能にする。
+  で差し替え可能にする。
 
 ### 推奨順序
-1. 先に遅延変換（`Lazy` + `materialize()`）を導入
+1. 先に処理モデル（`transform()`）を導入
 2. 後から settle 経路を bitmap task source 化
 
 理由: 不具合切り分けが容易で、互換性差分の検証ポイントを分離しやすい。
@@ -94,9 +94,9 @@
 
 ---
 
-## `impl-lazy-imagebitmap.md` への連携追記（提案）
+## `impl-imagebitmap-processing.md` への連携追記（提案）
 
-以下を `impl-lazy-imagebitmap.md` に追記する。
+以下を `impl-imagebitmap-processing.md` に追記する。
 
 ### 追記案1: 非目標の明確化
 - 段階1では task source 仕様変更を必須化しない（別タスクで段階導入）。
@@ -125,5 +125,5 @@
 
 ## 最終結論
 - `bitmap task source` 対応は、`libs/core` のイベントループ構造に **専用キュー/実行フェーズ**を追加する変更が中心。
-- 遅延変換（`materialize()`）と実装フェーズを分離して進めることは十分可能。
+- 処理モデル（`transform()`）と実装フェーズを分離して進めることは十分可能。
 - 先に settle 経路を抽象化しておけば、後から core 側を実装しても低リスクで結合できる。
