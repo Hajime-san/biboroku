@@ -1,0 +1,6 @@
+[tools]
+ruby = "4.0.9"
+
+[env]
+GEM_HOME = false
+GEM_PATH = false

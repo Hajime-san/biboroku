@@ -1,0 +1,9 @@
+title: biboroku
+theme: jekyll-theme-primer
+baseurl: /biboroku
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
